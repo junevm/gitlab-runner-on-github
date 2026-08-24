@@ -17,12 +17,13 @@ Run **GitLab CI/CD pipelines on GitHub Actions VMs** using the **Docker executor
 │  └── Stage 2: docker:build (image: docker:dind)             │
 └──────────────────────────────┬──────────────────────────────┘
                                │ Webhook (Pipeline event)
+                               │ [HMAC-SHA256 / X-Gitlab-Token]
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ Cloudflare Worker (Parametric Webhook Router)               │
 │                                                             │
 │  POST https://bridge.workers.dev/dispatch/backend-runner    │
-│  Translates webhook ──► POST /repos/org/backend-runner/...  │
+│  Validates signature ──► POST /repos/org/backend-runner/... │
 └──────────────────────────────┬──────────────────────────────┘
                                │ repository_dispatch
                                ▼
@@ -53,6 +54,7 @@ Run **GitLab CI/CD pipelines on GitHub Actions VMs** using the **Docker executor
 3. **No Daemon / Watchdog Complexity (KISS)**: Uses native `run-single` execution loops. When the GitLab pipeline queue is empty for 35s, the worker exits cleanly.
 4. **Configurable Multi-VM Elasticity**: Set the number of parallel VMs per project via a simple repository variable (`WORKERS`).
 5. **Universal Parametric Routing**: A single Cloudflare Worker dynamically routes webhooks to any project runner repo without code changes.
+6. **GitLab Webhook Standard Compliance**: Supports both modern GitLab **HMAC-SHA256 Signing Tokens** (`webhook-signature` header) and legacy **Secret Tokens** (`X-Gitlab-Token` header).
 
 ---
 
@@ -65,18 +67,19 @@ This repository is preconfigured with [`mise.toml`](mise.toml) and [`mise.lock`]
 mise install
 
 # Available project tasks
-mise run lint                   # Lint GitHub Actions workflows (actionlint + shellcheck)
-mise run worker:dev             # Start local Cloudflare Worker development server
-mise run worker:deploy          # Deploy the Cloudflare Worker bridge
-mise run worker:secret:pat      # Set GH_PAT secret in Cloudflare Worker
-mise run worker:secret:token    # Set GITLAB_SECRET_TOKEN secret in Cloudflare Worker
+mise run lint                     # Lint GitHub Actions workflows (actionlint + shellcheck)
+mise run worker:dev               # Start local Cloudflare Worker development server
+mise run worker:deploy            # Deploy the Cloudflare Worker bridge
+mise run worker:secret:pat        # Set GH_PAT secret in Cloudflare Worker
+mise run worker:secret:signing-token # Set GitLab HMAC-SHA256 Signing Token (Recommended)
+mise run worker:secret:token      # Set legacy GitLab Secret Token
 ```
 
 ---
 
 ## 📋 Prerequisites
 
-- **GitLab**: Maintainer/Owner access to your GitLab project (or group).
+- **GitLab**: Maintainer or Owner role in your GitLab project (or group).
 - **GitHub**: Account or Organization with repository creation permissions.
 - **Cloudflare**: Free account (used for the zero-cost webhook bridge).
 - **Local Tools**: [`mise`](https://mise.jdx.dev) (recommended) or `node` (v18+) and `npm`.
@@ -87,7 +90,7 @@ mise run worker:secret:token    # Set GITLAB_SECRET_TOKEN secret in Cloudflare W
 
 ### Step 1: Deploy the Cloudflare Webhook Router (One-time Setup)
 
-The Cloudflare Worker acts as the bridge between GitLab's Webhook payload and GitHub's `repository_dispatch` API.
+The Cloudflare Worker bridges GitLab Webhook payloads to GitHub's `repository_dispatch` API.
 
 1. **Generate a GitHub Personal Access Token (PAT)**:
    - Go to GitHub > **Settings** > **Developer Settings** > **Personal access tokens** > **Fine-grained tokens** (or Classic).
@@ -99,24 +102,16 @@ The Cloudflare Worker acts as the bridge between GitLab's Webhook payload and Gi
    - Open [`cloudflare-worker/wrangler.toml`](cloudflare-worker/wrangler.toml).
    - Update `GH_OWNER` with your GitHub username or organization name.
 
-3. **Deploy the Worker and Set Secrets**:
+3. **Deploy the Worker and Store GitHub PAT**:
    - Authenticate with Cloudflare:
      ```bash
      cd cloudflare-worker && npx wrangler login
      ```
-   - Set your GitHub PAT secret (paste the `github_pat_...` token when prompted):
+   - Store your GitHub PAT secret:
      ```bash
      mise run worker:secret:pat
      # (Runs: npx wrangler secret put GH_PAT)
      ```
-   - *(Optional but Recommended)* Set a shared webhook secret token to prevent unauthorized requests:
-     - Generate a random secret string (e.g., run `openssl rand -hex 24`).
-     - Save this secret in Cloudflare (paste the generated string when prompted):
-       ```bash
-       mise run worker:secret:token
-       # (Runs: npx wrangler secret put GITLAB_SECRET_TOKEN)
-       ```
-     - *Keep this secret string handy — you will paste the exact same value into GitLab in Step 5.*
    - Deploy the worker:
      ```bash
      mise run worker:deploy
@@ -135,7 +130,7 @@ The Cloudflare Worker acts as the bridge between GitLab's Webhook payload and Gi
    - Specify a tag (e.g., `docker-runner`), or check **Run untagged jobs** if you want all pipeline jobs to use this runner.
 5. Click **Create runner**.
 6. Copy the displayed **Runner authentication token** (starts with `glrt-...`).  
-   *(Note: This token is shown only once).*
+   *(Note: This token is displayed only once).*
 
 ---
 
@@ -173,15 +168,43 @@ To control how many parallel GitHub Actions VMs boot for this project:
 
 ### Step 5: Configure the GitLab Webhook
 
-1. In GitLab, go to your project > **Settings** > **Webhooks**.
+GitLab supports two authentication mechanisms for webhooks. For best security, use a **Signing Token** (HMAC-SHA256 signature verification):
+
+1. In GitLab, navigate to your project > **Settings** > **Webhooks**.
 2. Click **Add new webhook**:
    - **URL**: `https://<YOUR_CLOUDFLARE_WORKER_URL>/dispatch/<GITHUB_RUNNER_REPO_NAME>`  
      *(Example: `https://gitlab-gha-bridge.my-team.workers.dev/dispatch/my-project-runner`)*
-   - **Secret token**: Paste the exact secret string you set for `GITLAB_SECRET_TOKEN` in Step 1.3 (leave blank if you skipped setting `GITLAB_SECRET_TOKEN`).
-   - **Trigger**: Check **Pipeline events**.
-   - **SSL verification**: Ensure *Enable SSL verification* is checked.
+   - **Authentication** (Choose one):
+     - **Option A: Signing Token (Recommended)**:
+       - Under **Signing token**, click **Generate signing token**.
+       - Copy the generated token (starts with `whsec_...`).
+       - Save it into your Cloudflare Worker:
+         ```bash
+         mise run worker:secret:signing-token
+         # (Runs: npx wrangler secret put GITLAB_SIGNING_TOKEN)
+         ```
+     - **Option B: Secret Token (Legacy)**:
+       - Enter a secret string in **Secret token** (e.g. `openssl rand -hex 24`).
+       - Save it into your Cloudflare Worker:
+         ```bash
+         mise run worker:secret:token
+         # (Runs: npx wrangler secret put GITLAB_SECRET_TOKEN)
+         ```
+   - **Trigger**: Check **Pipeline events** (triggers whenever a pipeline is created, pending, or status changes).
+   - **Enable SSL verification**: Keep checked.
 3. Click **Add webhook**.
-4. Test the connection: Click **Test** > **Pipeline events** next to the created webhook. It should return HTTP `200 OK`.
+
+---
+
+### Step 6: Test & Verify Delivery
+
+1. In GitLab, under **Project Settings** > **Webhooks**, locate your webhook in the list.
+2. Click **Test** > select **Pipeline events**.
+3. You should see a success banner: `Hook executed successfully: HTTP 200`.
+4. **Inspect Delivery Details**:
+   - Scroll down to the **Recent events** section.
+   - Click **View details** next to any delivery to inspect the exact HTTP headers (`X-Gitlab-Event`, `webhook-signature`), request body, response code (`200 OK`), and response JSON.
+   - If needed, click **Resend request** to replay test payloads without triggering a new commit.
 
 ---
 
@@ -196,20 +219,26 @@ For reference on structuring multi-stage, containerized builds with services and
 - **Reusable Workflow**: Core execution logic lives in [`.github/workflows/reusable-runner.yml`](.github/workflows/reusable-runner.yml). All project runner repositories reference this single file, ensuring zero workflow drift across projects.
 - **Dynamic Matrix Generation**: The `setup` job parses `WORKERS` and creates a JSON matrix `[1, 2, ..., N]`. GitHub Actions provisions $N$ independent VMs concurrently.
 - **Lifecycle & Auto-Shutdown**: Each VM runs `gitlab-runner run-single` inside a loop. When all jobs in the pipeline finish and the queue is empty for 35s, the process exits non-zero, terminating the loop and cleanly stopping the VM.
-- **Webhook Bridge**: The worker in [`cloudflare-worker/worker.js`](cloudflare-worker/worker.js) inspects incoming webhook events, validates the optional `X-Gitlab-Token` header against `GITLAB_SECRET_TOKEN`, confirms the pipeline status (`pending` / `created`), extracts the target repo from the URL path, and calls GitHub's `POST /repos/{owner}/{repo}/dispatches` endpoint.
+- **Webhook Bridge**: The worker in [`cloudflare-worker/worker.js`](cloudflare-worker/worker.js) validates the cryptographic signature (`webhook-signature`) or `X-Gitlab-Token` header, confirms the pipeline status (`pending` / `created`), extracts the target repo from the URL path, and calls GitHub's `POST /repos/{owner}/{repo}/dispatches` endpoint.
 
 ---
 
 ## 🛠️ Troubleshooting & FAQ
 
+### Webhook returns HTTP 401 "Unauthorized: Invalid webhook-signature HMAC"
+The signing token configured in GitLab does not match `GITLAB_SIGNING_TOKEN` in Cloudflare. Run `mise run worker:secret:signing-token` to update it with the `whsec_...` value from GitLab.
+
 ### Webhook returns HTTP 401 "Unauthorized: Invalid X-Gitlab-Token header"
-The secret string entered in GitLab Webhook settings does not match the `GITLAB_SECRET_TOKEN` configured in Cloudflare. Update either GitLab's Webhook Secret Token or run `mise run worker:secret:token` to realign them.
+The secret string entered in GitLab Webhook settings does not match `GITLAB_SECRET_TOKEN` in Cloudflare. Update either GitLab's Webhook Secret Token or run `mise run worker:secret:token` to realign them.
 
 ### Webhook returns HTTP 400 "Missing target repository"
 Ensure your GitLab webhook URL includes the target repo path: `https://<WORKER_URL>/dispatch/<REPO_NAME>`.
 
 ### Webhook returns HTTP 502 "GitHub API error"
 Verify that `GH_PAT` in Cloudflare has valid permissions (`Actions: Read and Write`, `Metadata: Read`) and that `GH_OWNER` in `wrangler.toml` matches the repository owner.
+
+### GitLab Webhook has "Disabled" badge
+GitLab automatically disables webhooks if they repeatedly encounter 5xx errors or exceed the 10-second timeout. Once the endpoint is healthy, click **Edit** on the webhook in GitLab, clear the disabled status, and click **Save changes**.
 
 ### GitLab CI jobs remain in "Pending" / "Stuck"
 - Verify that the runner tag in `.gitlab-ci.yml` matches the tag assigned to the runner in GitLab (or that the runner has "Run untagged jobs" enabled).

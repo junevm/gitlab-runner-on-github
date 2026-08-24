@@ -25,7 +25,12 @@ description = "Set GitHub Personal Access Token in Cloudflare Worker secrets"
 dir = "cloudflare-worker"
 run = "npx wrangler secret put GH_PAT"
 
+[tasks."worker:secret:signing-token"]
+description = "Set GitLab Standard Webhook Signing Token (HMAC-SHA256) in Cloudflare secrets"
+dir = "cloudflare-worker"
+run = "npx wrangler secret put GITLAB_SIGNING_TOKEN"
+
 [tasks."worker:secret:token"]
-description = "Set optional GitLab Webhook secret token in Cloudflare Worker secrets"
+description = "Set legacy GitLab X-Gitlab-Token secret in Cloudflare secrets"
 dir = "cloudflare-worker"
 run = "npx wrangler secret put GITLAB_SECRET_TOKEN"

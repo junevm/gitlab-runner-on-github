@@ -2,12 +2,38 @@
  * Parametric GitLab Webhook -> GitHub Actions Dispatch Bridge (Cloudflare Worker)
  *
  * Routes GitLab Pipeline webhooks to dedicated, isolated GitHub Action runner repos.
+ * Supports both modern GitLab Standard Webhooks HMAC-SHA256 Signing Tokens
+ * and legacy X-Gitlab-Token secret tokens.
  *
  * Routing Options:
  *   1. Path-based:   POST https://bridge.your-subdomain.workers.dev/dispatch/my-project-runner
  *   2. Query-based:  POST https://bridge.your-subdomain.workers.dev/dispatch?repo=my-project-runner
  *   3. Default:      Falls back to env.GH_DEFAULT_REPO if configured.
  */
+
+async function verifyHmacSignature(signingToken, messageId, timestamp, rawBody, receivedSignatures) {
+  if (!signingToken || !messageId || !timestamp || !receivedSignatures) return false;
+  try {
+    const rawKeyBase64 = signingToken.replace(/^whsec_/, "");
+    const binaryKey = Uint8Array.from(atob(rawKeyBase64), (c) => c.charCodeAt(0));
+    const key = await crypto.subtle.importKey(
+      "raw",
+      binaryKey,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    const message = `${messageId}.${timestamp}.${rawBody}`;
+    const sigBuffer = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+    const expectedSig = "v1," + btoa(String.fromCharCode(...new Uint8Array(sigBuffer)));
+
+    // Split space-separated signatures and compare
+    const sigList = receivedSignatures.split(" ");
+    return sigList.includes(expectedSig);
+  } catch {
+    return false;
+  }
+}
 
 export default {
   async fetch(request, env) {
@@ -18,8 +44,31 @@ export default {
       );
     }
 
-    // Optional Shared Secret Validation
-    if (env.GITLAB_SECRET_TOKEN) {
+    const rawBody = await request.text();
+
+    // 1. Authenticate using Signing Token (HMAC-SHA256 - Recommended)
+    if (env.GITLAB_SIGNING_TOKEN) {
+      const messageId = request.headers.get("webhook-id");
+      const timestamp = request.headers.get("webhook-timestamp");
+      const signature = request.headers.get("webhook-signature");
+
+      const isValid = await verifyHmacSignature(
+        env.GITLAB_SIGNING_TOKEN,
+        messageId,
+        timestamp,
+        rawBody,
+        signature
+      );
+
+      if (!isValid) {
+        return new Response(
+          JSON.stringify({ error: "Unauthorized: Invalid webhook-signature HMAC" }),
+          { status: 401, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    }
+    // 2. Authenticate using Secret Token (X-Gitlab-Token - Fallback)
+    else if (env.GITLAB_SECRET_TOKEN) {
       const token = request.headers.get("X-Gitlab-Token");
       if (token !== env.GITLAB_SECRET_TOKEN) {
         return new Response(
@@ -31,7 +80,7 @@ export default {
 
     let payload;
     try {
-      payload = await request.json();
+      payload = JSON.parse(rawBody);
     } catch {
       return new Response(
         JSON.stringify({ error: "Invalid JSON body" }),
@@ -43,7 +92,7 @@ export default {
     const objectKind = payload.object_kind;
     const pipelineStatus = payload.object_attributes?.status;
 
-    // Only trigger when a pipeline is created or pending
+    // Only trigger when a pipeline is created, pending, or running
     const isPipelineEvent = objectKind === "pipeline" || eventType === "Pipeline Hook";
     const isActionableStatus = ["pending", "created", "running"].includes(pipelineStatus);
 
@@ -61,8 +110,7 @@ export default {
     // Resolve Target GitHub Repository
     const url = new URL(request.url);
     const pathSegments = url.pathname.split("/").filter(Boolean);
-    
-    // Check path: /dispatch/:repo or /:repo
+
     let targetRepo = null;
     if (pathSegments.length >= 2 && pathSegments[0] === "dispatch") {
       targetRepo = pathSegments[1];
@@ -70,12 +118,12 @@ export default {
       targetRepo = pathSegments[0];
     }
 
-    // Check query parameter fallback: ?repo=...
+    // Query parameter fallback: ?repo=...
     if (!targetRepo) {
       targetRepo = url.searchParams.get("repo");
     }
 
-    // Fallback to default repo
+    // Default repo fallback
     if (!targetRepo) {
       targetRepo = env.GH_DEFAULT_REPO;
     }
