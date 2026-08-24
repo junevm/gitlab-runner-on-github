@@ -120,7 +120,6 @@ The Cloudflare Worker receives webhooks from GitLab and dispatches workflow runs
    - **Option B (Classic)**:
      - Select scope: **`repo`** (Full control of private repositories).
      - Copy the token (`ghp_...`).
-   - *Tip: If you use the GitHub CLI locally (`gh auth login`), you can export your existing token with `gh auth token`.*
 
 2. **Configure the Worker**:
    - Open [`cloudflare-worker/wrangler.toml`](cloudflare-worker/wrangler.toml).
