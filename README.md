@@ -125,7 +125,7 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
      mise run worker:secret:signing-token   # Paste whsec_... key when prompted
      mise run worker:deploy
      ```
-4. **Trigger**: Check **Pipeline events**.
+4. **Trigger**: Check **Pipeline events** and **Job events** (enables JIT stage auto-bursting).
 5. Click **Add webhook**.
 
 ---
