@@ -6,7 +6,6 @@ on:
       workers:
         description: "Number of parallel GitHub Actions VM workers"
         required: false
-        default: "2"
         type: string
       wait_timeout:
         description: "Seconds to wait for a job before worker shuts down"
@@ -18,6 +17,8 @@ on:
         required: true
       GITLAB_URL:
         required: false
+      WORKERS:
+        required: false
 
 jobs:
   setup:
@@ -28,7 +29,7 @@ jobs:
     steps:
       - id: calc
         env:
-          WORKER_COUNT: ${{ inputs.workers || vars.WORKERS || 2 }}
+          WORKER_COUNT: ${{ inputs.workers || vars.WORKERS || secrets.WORKERS || 2 }}
         run: |
           COUNT=$(node -e "
             const val = parseInt(process.env.WORKER_COUNT, 10);

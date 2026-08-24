@@ -6,9 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       workers:
-        description: "Number of parallel GitHub Actions VM workers"
+        description: "Number of parallel GitHub Actions VM workers (leave empty to use WORKERS secret/variable)"
         required: false
-        default: "2"
         type: string
 
 concurrency:
@@ -24,7 +23,7 @@ jobs:
     steps:
       - id: calc
         env:
-          WORKER_COUNT: ${{ inputs.workers || vars.WORKERS || 2 }}
+          WORKER_COUNT: ${{ inputs.workers || vars.WORKERS || secrets.WORKERS || 2 }}
         run: |
           COUNT=$(node -e "
             const val = parseInt(process.env.WORKER_COUNT, 10);
