@@ -12,7 +12,7 @@ on:
         type: string
 
 concurrency:
-  group: gitlab-runner-${{ github.ref }}
+  group: gitlab-runner-${{ github.event.client_payload.pipeline_id || github.run_id }}
   cancel-in-progress: false
 
 jobs:
