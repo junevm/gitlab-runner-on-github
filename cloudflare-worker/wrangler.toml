@@ -1,0 +1,14 @@
+name = "gitlab-gha-bridge"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+# Your GitHub Username or Organization
+GH_OWNER = "junevm"
+
+# Optional fallback default repository
+# GH_DEFAULT_REPO = "default-runner-repo"
+
+# Required Secrets (set using wrangler secret put):
+# wrangler secret put GH_PAT
+# wrangler secret put GITLAB_SECRET_TOKEN  # (Optional, for webhook verification)

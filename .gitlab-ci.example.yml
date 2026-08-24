@@ -1,0 +1,54 @@
+# ==============================================================================
+# Example .gitlab-ci.yml using the GitHub Actions-hosted Docker Runner
+# ==============================================================================
+
+stages:
+  - test
+  - build
+  - deploy
+
+default:
+  tags:
+    - docker-runner # Match the tag created in GitLab Runner settings (or remove if untagged)
+
+# Stage 1: Python Testing Container
+test_python:
+  stage: test
+  image: python:3.11-slim
+  script:
+    - python --version
+    - echo "Running tests inside Python 3.11 container on GitHub Actions VM..."
+    - pip install --upgrade pip
+    - echo "All Python unit tests passed!"
+
+# Stage 1 (Parallel): Node.js Linting Container
+test_node:
+  stage: test
+  image: node:20-alpine
+  script:
+    - node --version
+    - echo "Running linter inside Node 20 container on GitHub Actions VM..."
+    - echo "Linting passed!"
+
+# Stage 2: Docker Build using Docker-in-Docker (DinD)
+build_docker:
+  stage: build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  variables:
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - docker info
+    - echo "Building Docker image inside GitHub Actions VM..."
+    - echo -e 'FROM alpine:latest\nCMD ["echo", "Hello from GitLab on GitHub Actions!"]' > Dockerfile
+    - docker build -t my-app:latest .
+    - docker images
+
+# Stage 3: Deployment / Release Step
+deploy_job:
+  stage: deploy
+  image: alpine:latest
+  script:
+    - echo "Deploying application artifacts..."
+    - echo "Pipeline completed successfully!"

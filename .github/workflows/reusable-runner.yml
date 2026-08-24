@@ -1,0 +1,94 @@
+name: Reusable GitLab Docker Runner
+
+on:
+  workflow_call:
+    inputs:
+      workers:
+        description: "Number of parallel GitHub Actions VM workers"
+        required: false
+        type: number
+      wait_timeout:
+        description: "Seconds to wait for a job before worker shuts down"
+        required: false
+        default: 35
+        type: number
+    secrets:
+      GITLAB_RUNNER_TOKEN:
+        required: true
+      GITLAB_URL:
+        required: false
+
+jobs:
+  setup:
+    name: Calculate Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.calc.outputs.matrix }}
+    steps:
+      - id: calc
+        env:
+          # Priority: Workflow Call Input -> Repo Variable (vars.WORKERS) -> Default (2)
+          WORKER_COUNT: ${{ inputs.workers || vars.WORKERS || 2 }}
+        run: |
+          COUNT=$(node -e "
+            const val = parseInt(process.env.WORKER_COUNT, 10);
+            const bounded = Math.max(1, Math.min(20, isNaN(val) ? 2 : val));
+            console.log(bounded);
+          ")
+          echo "Determined worker count: $COUNT"
+          MATRIX=$(node -e "console.log(JSON.stringify(Array.from({length: $COUNT}, (_, i) => i + 1)))")
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  worker:
+    needs: setup
+    name: Docker Worker
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        worker_id: ${{ fromJson(needs.setup.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - name: Cache GitLab Runner Binary
+        id: cache-runner
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/gitlab-runner
+          key: gitlab-runner-linux-amd64-v1
+
+      - name: Install GitLab Runner
+        if: steps.cache-runner.outputs.cache-hit != 'true'
+        run: |
+          sudo curl -fsSL -L \
+            "https://gitlab-runner-downloads.s3.amazonaws.com/latest/binaries/gitlab-runner-linux-amd64" \
+            -o /usr/local/bin/gitlab-runner
+          sudo chmod +x /usr/local/bin/gitlab-runner
+
+      - name: Verify Environment & Docker
+        run: |
+          gitlab-runner --version
+          docker info > /dev/null 2>&1 || sudo systemctl start docker
+
+      - name: Execute GitLab CI Jobs in Docker
+        env:
+          GITLAB_URL: ${{ secrets.GITLAB_URL || 'https://gitlab.com' }}
+          GITLAB_RUNNER_TOKEN: ${{ secrets.GITLAB_RUNNER_TOKEN }}
+          WAIT_TIMEOUT: ${{ inputs.wait_timeout || 35 }}
+        run: |
+          echo "🚀 Worker #${{ matrix.worker_id }} listening for GitLab CI jobs..."
+          
+          # Native single-job loop: pulls and executes jobs one by one inside Docker containers.
+          # When all pipeline stages complete and queue is empty for WAIT_TIMEOUT seconds,
+          # run-single exits with a non-zero exit code, terminating the loop cleanly.
+          while gitlab-runner run-single \
+            --url "${GITLAB_URL}" \
+            --token "${GITLAB_RUNNER_TOKEN}" \
+            --executor docker \
+            --docker-image "ubuntu:latest" \
+            --docker-privileged \
+            --docker-volumes "/var/run/docker.sock:/var/run/docker.sock" \
+            --docker-volumes "/cache" \
+            --wait-timeout "${WAIT_TIMEOUT}"; do
+            echo "✅ Stage/Job finished successfully. Checking for next job in pipeline..."
+          done
+
+          echo "🏁 Worker #${{ matrix.worker_id }} finished (no more pending jobs). Exiting."

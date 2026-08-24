@@ -1,0 +1,24 @@
+name: GitLab Docker Runner
+
+on:
+  repository_dispatch:
+    types: [gitlab_pipeline, start_runner]
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: "Number of parallel GitHub Actions VM workers (overrides vars.WORKERS)"
+        required: false
+        type: number
+
+concurrency:
+  group: gitlab-runner-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  runner:
+    uses: ./.github/workflows/reusable-runner.yml
+    with:
+      workers: ${{ inputs.workers }}
+    secrets:
+      GITLAB_RUNNER_TOKEN: ${{ secrets.GITLAB_RUNNER_TOKEN }}
+      GITLAB_URL: ${{ secrets.GITLAB_URL }}

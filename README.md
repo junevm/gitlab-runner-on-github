@@ -1,215 +1,213 @@
-Ahh, **now I get your idea**.
+# Ephemeral GitLab Docker Runner on GitHub Actions
 
-You want to use a **GitHub Actions-hosted VM as an ephemeral GitLab self-hosted runner**:
+Run **GitLab CI/CD pipelines on GitHub Actions VMs** using the **Docker executor**, on-demand, with complete project isolation and zero idle cost.
 
-```text
-GitLab pipeline starts
-      ↓
-GitHub Actions starts
-      ↓
-GitHub Ubuntu VM
-      ↓
-install GitLab Runner
-      ↓
-register to GitLab
-      ↓
-GitLab assigns jobs to it
-      ↓
-GitLab Runner executes them
-```
+---
 
-**Yes, technically this can work**, but there's a bootstrapping problem: GitLab cannot magically start the GitHub Actions VM by itself. You need a **small trigger/control plane**.
-
-## The clever architecture
-
-Use a GitHub Actions workflow as an **ephemeral GitLab Runner provisioner**:
+## 🎯 Architecture Overview
 
 ```text
-GitLab
-  │
-  │ API/webhook trigger
-  ▼
-GitHub Actions
-  │
-  ▼
-ubuntu-latest VM
-  │
-  ├─ download gitlab-runner
-  ├─ register with GitLab
-  ├─ run gitlab-runner
-  │
-  ▼
-GitLab CI jobs execute here
+┌─────────────────────────────────────────────────────────────┐
+│ GitLab Project (e.g. "backend-service")                     │
+│                                                             │
+│  Pipeline Created (Pending)                                 │
+│  Jobs:                                                      │
+│  ├── Stage 1: test:unit   (image: python:3.11)              │
+│  ├── Stage 1: test:lint   (image: node:20)                  │
+│  └── Stage 2: docker:build (image: docker:dind)             │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ Webhook (Pipeline event)
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Cloudflare Worker (Parametric Webhook Router)               │
+│                                                             │
+│  POST https://bridge.workers.dev/dispatch/backend-runner    │
+│  Translates webhook ──► POST /repos/org/backend-runner/...  │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ repository_dispatch
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Dedicated GitHub Runner Repo (backend-runner)               │
+│                                                             │
+│  Spawns N Parallel Ephemeral VMs (vars.WORKERS = 2)         │
+│                                                             │
+│  ┌───────────────────────┐     ┌───────────────────────┐    │
+│  │ GitHub VM Worker #1   │     │ GitHub VM Worker #2   │    │
+│  │ (Docker Engine)       │     │ (Docker Engine)       │    │
+│  │                       │     │                       │    │
+│  │ gitlab-runner         │     │ gitlab-runner         │    │
+│  │ run-single (Docker)   │     │ run-single (Docker)   │    │
+│  │                       │     │                       │    │
+│  │ ├─ runs test:unit     │     │ ├─ runs test:lint     │    │
+│  │ └─ runs docker:build  │     │ └─ idle (35s) ──► exit│    │
+│  └───────────────────────┘     └───────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-GitLab Runner supports being registered dynamically with a runner authentication token and run directly with `gitlab-runner run`. ([GitLab Docs][1])
+---
 
-### GitHub workflow
+## 🔑 Core Design Principles
 
-```yaml
-name: GitLab Runner
+1. **Strict 1:1 Project Isolation**: Each GitLab project has its own dedicated GitHub runner repository and project-level runner token (`glrt-...`). Project A cannot access, see, or run jobs for Project B.
+2. **Pure Docker Execution**: Every job runs inside an isolated container via `gitlab-runner run-single` with Docker-in-Docker (`docker:dind`) and Docker socket mounting.
+3. **No Daemon / Watchdog Complexity (KISS)**: Uses native `run-single` execution loops. When the GitLab pipeline queue is empty for 35s, the worker exits cleanly.
+4. **Configurable Multi-VM Elasticity**: Set the number of parallel VMs per project via a simple repository variable (`WORKERS`).
+5. **Universal Parametric Routing**: A single Cloudflare Worker dynamically routes webhooks to any project runner repo without code changes.
 
-on:
-  workflow_dispatch:
+---
 
-jobs:
-  runner:
-    runs-on: ubuntu-latest
+## 🛠️ Local Development & Tooling with `mise`
 
-    steps:
-      - name: Install GitLab Runner
-        run: |
-          curl -L \
-            https://gitlab-runner-downloads.s3.amazonaws.com/latest/binaries/gitlab-runner-linux-amd64 \
-            -o gitlab-runner
+This repository is preconfigured with [`mise.toml`](mise.toml) and [`mise.lock`](mise.lock) (with `lockfile = true` enabled) for pinned, reproducible toolchains (`node@lts`, `actionlint@latest`, `shellcheck@latest`) across all platforms:
 
-          chmod +x gitlab-runner
+```bash
+# Install all pinned dev tools
+mise install
 
-      - name: Register GitLab Runner
-        env:
-          GITLAB_RUNNER_TOKEN: ${{ secrets.GITLAB_RUNNER_TOKEN }}
-        run: |
-          ./gitlab-runner register \
-            --non-interactive \
-            --url "https://gitlab.com" \
-            --token "$GITLAB_RUNNER_TOKEN" \
-            --executor "shell"
-
-      - name: Run GitLab Runner
-        run: ./gitlab-runner run
+# Available project tasks
+mise run lint                   # Lint GitHub Actions workflows (actionlint + shellcheck)
+mise run worker:dev             # Start local Cloudflare Worker development server
+mise run worker:deploy          # Deploy the Cloudflare Worker bridge
+mise run worker:secret:pat      # Set GH_PAT secret in Cloudflare Worker
+mise run worker:secret:token    # Set GITLAB_SECRET_TOKEN secret in Cloudflare Worker
 ```
 
-The `run` command keeps the GitHub Actions job alive while the GitLab Runner polls GitLab and executes jobs.
+---
 
-Your GitLab jobs would then use:
+## 📋 Prerequisites
 
-```yaml
-build:
-  tags:
-    - github-runner
-  script:
-    - echo "running on GitHub-hosted VM"
-    - make build
-```
+- **GitLab**: Maintainer/Owner access to your GitLab project (or group).
+- **GitHub**: Account or Organization with repository creation permissions.
+- **Cloudflare**: Free account (used for the zero-cost webhook bridge).
+- **Local Tools**: [`mise`](https://mise.jdx.dev) (recommended) or `node` (v18+) and `npm`.
 
-## But: the real problem is triggering it automatically
+---
 
-GitLab pipeline:
+## 🚀 Step-by-Step Setup Guide
 
-```text
-pipeline created
-    │
-    ▼
-needs runner ❌
-```
+### Step 1: Deploy the Cloudflare Webhook Router (One-time Setup)
 
-The GitHub VM must already exist.
+The Cloudflare Worker acts as the bridge between GitLab's Webhook payload and GitHub's `repository_dispatch` API.
 
-### Best solution: keep a provisioning workflow running
+1. **Generate a GitHub Personal Access Token (PAT)**:
+   - Go to GitHub > **Settings** > **Developer Settings** > **Personal access tokens** > **Fine-grained tokens** (or Classic).
+   - **Repository access**: Select *All repositories* or *Only select repositories* (your runner repos).
+   - **Permissions**: `Actions` (Read and Write), `Metadata` (Read).
+   - Copy the generated token (`github_pat_...`).
 
-GitHub Actions:
+2. **Configure the Worker**:
+   - Open [`cloudflare-worker/wrangler.toml`](cloudflare-worker/wrangler.toml).
+   - Update `GH_OWNER` with your GitHub username or organization name.
 
-```text
-workflow starts
-    │
-    ▼
-GitLab runner connects
-    │
-    ▼
-waits for GitLab job
-    │
-    ▼
-executes job
-```
+3. **Deploy the Worker**:
+   - Authenticate with Cloudflare:
+     ```bash
+     cd cloudflare-worker && npx wrangler login
+     ```
+   - Store your GitHub PAT as an encrypted secret in Cloudflare:
+     ```bash
+     mise run worker:secret:pat
+     # Or: npx wrangler secret put GH_PAT (inside cloudflare-worker/)
+     ```
+   - *(Optional)* Set a shared secret token for webhook validation:
+     ```bash
+     mise run worker:secret:token
+     # Or: npx wrangler secret put GITLAB_SECRET_TOKEN (inside cloudflare-worker/)
+     ```
+   - Deploy:
+     ```bash
+     mise run worker:deploy
+     # Or: npx wrangler deploy (inside cloudflare-worker/)
+     ```
+   - Note down the published worker URL (e.g. `https://gitlab-gha-bridge.<your-subdomain>.workers.dev`).
 
-But GitHub-hosted runners have a maximum job lifetime, so you cannot keep one permanently running. After the job completes, the VM disappears.
+---
 
-## The approach I'd actually recommend
+### Step 2: Create a Project Runner in GitLab
 
-Create a **GitHub Actions workflow that provisions one temporary GitLab runner**, then trigger that workflow from GitLab.
+1. In GitLab, navigate to your project > **Settings** > **CI/CD** > **Runners**.
+2. Click **New project runner**.
+3. Under **Platform**, select **Linux**.
+4. Under **Tags**:
+   - Specify a tag (e.g., `docker-runner`), or check **Run untagged jobs** if you want all pipeline jobs to use this runner.
+5. Click **Create runner**.
+6. Copy the displayed **Runner authentication token** (starts with `glrt-...`).  
+   *(Note: This token is shown only once).*
 
-```text
-GitLab pipeline
-     │
-     ├── trigger GitHub API
-     │
-     ▼
-GitHub Actions VM starts
-     │
-     ▼
-registers as GitLab Runner
-     │
-     ▼
-GitLab jobs wait
-     │
-     ▼
-runner picks up job
-     │
-     ▼
-job finishes
-     │
-     ▼
-GitHub VM dies
-```
+---
 
-The initial GitLab job that triggers GitHub would need to run somewhere, though. That's the catch: it would consume at least a little GitLab runner time unless triggered externally.
+### Step 3: Create the Dedicated GitHub Runner Repository
 
-### Better: use a GitLab webhook
+1. On GitHub, create a new private repository for this project's runner (e.g., `my-project-runner`).
+2. Add the caller workflow file to the repo at [`.github/workflows/runner.yml`](.github/workflows/runner.yml):
+   - Copy the contents from this repository's [`.github/workflows/runner.yml`](.github/workflows/runner.yml).
+   - Update the `uses:` reference to point to this central repository:
+     ```yaml
+     uses: <YOUR_CENTRAL_ORG>/gitlab-runner-on-github/.github/workflows/reusable-runner.yml@main
+     ```
+3. Configure Secrets in the runner repo:
+   - Go to **Settings** > **Secrets and variables** > **Actions** > **Secrets** tab.
+   - Click **New repository secret**:
+     - Name: `GITLAB_RUNNER_TOKEN`
+     - Value: Paste the `glrt-...` token from Step 2.
+   - *(Optional)* If using a self-hosted GitLab instance, add `GITLAB_URL` (e.g., `https://gitlab.example.com`). Defaults to `https://gitlab.com` if omitted.
 
-```text
-push to GitLab
-    │
-    ▼
-GitLab webhook
-    │
-    ▼
-GitHub repository_dispatch
-    │
-    ▼
-GitHub Actions
-    │
-    ▼
-GitLab Runner starts
-```
+---
 
-Then **zero GitLab compute is needed to provision the runner**.
+### Step 4: Configure Concurrency / Elasticity
 
-## Important limitation
+To control how many parallel GitHub Actions VMs boot for this project:
 
-This is not truly "free unlimited GitLab CI." GitHub-hosted runners have their own quotas and billing rules, and using them as an arbitrary long-running GitLab runner is an unusual use case. GitHub-hosted runners are designed for Actions jobs, while GitLab Runner is designed to execute GitLab jobs. ([GitHub][2])
+1. In your project runner repository on GitHub:
+   - Go to **Settings** > **Secrets and variables** > **Actions** > **Variables** tab.
+2. Click **New repository variable**:
+   - Name: `WORKERS`
+   - Value: `4` (or any integer from `1` to `20`). Defaults to `2` if not set.
 
-Also, a `shell` executor would execute GitLab job commands directly on the GitHub VM. GitLab officially supports registering and running a shell executor this way. ([GitLab Docs][3])
+*Tip: You can also override the worker count ad-hoc when manually triggering the workflow via the GitHub Actions UI.*
 
-## The architecture I would build for you
+---
 
-```text
-                 ┌──────────────────────┐
-                 │       GitLab         │
-                 │                      │
-git push ───────► │ pipeline created    │
-                 │ jobs queued          │
-                 └──────────┬───────────┘
-                            │ webhook
-                            ▼
-                 ┌──────────────────────┐
-                 │ GitHub Actions       │
-                 │ ubuntu-latest        │
-                 │                      │
-                 │ install runner       │
-                 │ register runner      │
-                 │                      │
-                 │  ┌──────────────┐    │
-                 │  │GitLab Runner │◄───┼──── polls GitLab
-                 │  └──────┬───────┘    │
-                 │         ▼            │
-                 │    executes CI       │
-                 └──────────────────────┘
-```
+### Step 5: Configure the GitLab Webhook
 
-**Yes, this is exactly the hack you're thinking of, and it should be possible.** The main engineering challenge is making the GitHub Actions workflow start automatically and registering a fresh ephemeral GitLab runner safely for each pipeline. The runner authentication-token registration flow is the modern GitLab approach. ([GitLab Docs][1])
+1. In GitLab, go to your project > **Settings** > **Webhooks**.
+2. Click **Add new webhook**:
+   - **URL**: `https://<YOUR_CLOUDFLARE_WORKER_URL>/dispatch/<GITHUB_RUNNER_REPO_NAME>`  
+     *(Example: `https://gitlab-gha-bridge.my-team.workers.dev/dispatch/my-project-runner`)*
+   - **Secret token**: Paste the `GITLAB_SECRET_TOKEN` (if configured in Step 1).
+   - **Trigger**: Check **Pipeline events**.
+   - **SSL verification**: Ensure *Enable SSL verification* is checked.
+3. Click **Add webhook**.
+4. Test the connection: Click **Test** > **Pipeline events** next to the created webhook. It should return HTTP `200 OK`.
 
-If you want, I can give you the **actual fire-and-forget implementation**: GitLab webhook → GitHub Actions → ephemeral GitLab runner → automatic cleanup, with the exact YAML and API setup.
+---
 
-[1]: https://docs.gitlab.com/runner/register/?utm_source=chatgpt.com "Registering runners | GitLab Docs"
-[2]: https://github.com/actions/runner/blob/main/docs/design/auth.md?utm_source=chatgpt.com "runner/docs/design/auth.md at main · actions/runner · GitHub"
-[3]: https://docs.gitlab.com/tutorials/create_register_first_runner/?utm_source=chatgpt.com "Tutorial: Create, register, and run your own project runner | GitLab Docs"
+## 📝 Example Pipeline Definition
+
+For reference on structuring multi-stage, containerized builds with services and Docker-in-Docker, see [`.gitlab-ci.example.yml`](.gitlab-ci.example.yml).
+
+---
+
+## 🔍 Technical Details
+
+- **Reusable Workflow**: Core execution logic lives in [`.github/workflows/reusable-runner.yml`](.github/workflows/reusable-runner.yml). All project runner repositories reference this single file, ensuring zero workflow drift across projects.
+- **Dynamic Matrix Generation**: The `setup` job parses `WORKERS` and creates a JSON matrix `[1, 2, ..., N]`. GitHub Actions provisions $N$ independent VMs concurrently.
+- **Lifecycle & Auto-Shutdown**: Each VM runs `gitlab-runner run-single` inside a loop. When all jobs in the pipeline finish and the queue is empty for 35s, the process exits non-zero, terminating the loop and cleanly stopping the VM.
+- **Webhook Bridge**: The worker in [`cloudflare-worker/worker.js`](cloudflare-worker/worker.js) inspects incoming webhook events, validates the pipeline status (`pending` / `created`), extracts the target repo from the URL path, and calls GitHub's `POST /repos/{owner}/{repo}/dispatches` endpoint.
+
+---
+
+## 🛠️ Troubleshooting & FAQ
+
+### Webhook returns HTTP 400 "Missing target repository"
+Ensure your GitLab webhook URL includes the target repo path: `https://<WORKER_URL>/dispatch/<REPO_NAME>`.
+
+### Webhook returns HTTP 502 "GitHub API error"
+Verify that `GH_PAT` in Cloudflare has valid permissions (`Actions: Read and Write`, `Metadata: Read`) and that `GH_OWNER` in `wrangler.toml` matches the repository owner.
+
+### GitLab CI jobs remain in "Pending" / "Stuck"
+- Verify that the runner tag in `.gitlab-ci.yml` matches the tag assigned to the runner in GitLab (or that the runner has "Run untagged jobs" enabled).
+- Check that `GITLAB_RUNNER_TOKEN` is correctly set in GitHub Secrets.
+
+### Parallel jobs running sequentially instead of concurrently
+Increase the `WORKERS` variable in your GitHub runner repository settings (e.g. `WORKERS = 4`). Ensure your GitHub account has enough available Action concurrency slots.
