@@ -226,7 +226,7 @@ With setup complete, verify the full automated flow:
 3. **Observe Automated Execution**:
    - **GitLab**: The pipeline is created and enters `pending` status. Webhook triggers automatically.
    - **Cloudflare Worker**: Authenticates the payload and dispatches a workflow run to GitHub Actions.
-   - **GitHub Actions**: Spawns $N$ parallel Ubuntu VMs (`vars.WORKERS`), pulls the `gitlab-runner` binary, and registers with Docker executor.
+   - **GitHub Actions**: Spawns $N$ parallel Ubuntu VMs (`vars.WORKERS`) and starts the official containerized `gitlab/gitlab-runner:latest` worker.
    - **Live Execution**: GitLab CI jobs execute inside Docker containers on the GitHub VMs. Logs stream live in the GitLab UI.
    - **Clean Auto-Shutdown**: When all pipeline stages complete, the runners wait 35s, find no remaining jobs, and exit. The GitHub VMs shut down with zero wasted minutes.
 
@@ -250,7 +250,7 @@ For reference on structuring multi-stage, containerized builds with services and
 
 - **Reusable Workflow**: Core execution logic lives in [`.github/workflows/reusable-runner.yml`](.github/workflows/reusable-runner.yml). All project runner repositories reference this single file, ensuring zero workflow drift across projects.
 - **Dynamic Matrix Generation**: The `setup` job parses `WORKERS` and creates a JSON matrix `[1, 2, ..., N]`. GitHub Actions provisions $N$ independent VMs concurrently.
-- **Lifecycle & Auto-Shutdown**: Each VM runs `gitlab-runner run-single` inside a loop. When all jobs in the pipeline finish and the queue is empty for 35s, the process exits non-zero, terminating the loop and cleanly stopping the VM.
+- **Lifecycle & Auto-Shutdown**: Each VM runs `docker run --rm -v /var/run/docker.sock:/var/run/docker.sock gitlab/gitlab-runner:latest run-single ...` inside a loop. When all jobs in the pipeline finish and the queue is empty for 35s, the process exits non-zero, terminating the loop and cleanly stopping the VM.
 - **Webhook Bridge**: The worker in [`cloudflare-worker/worker.js`](cloudflare-worker/worker.js) validates the cryptographic signature (`webhook-signature`) or `X-Gitlab-Token` header, confirms the pipeline status (`pending` / `created`), extracts the target repo from the URL path, and calls GitHub's `POST /repos/{owner}/{repo}/dispatches` endpoint.
 
 ---

@@ -6,19 +6,65 @@ on:
   workflow_dispatch:
     inputs:
       workers:
-        description: "Number of parallel GitHub Actions VM workers (overrides vars.WORKERS)"
+        description: "Number of parallel GitHub Actions VM workers"
         required: false
-        type: number
+        default: "2"
+        type: string
 
 concurrency:
   group: gitlab-runner-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  runner:
-    uses: ./.github/workflows/reusable-runner.yml
-    with:
-      workers: ${{ inputs.workers }}
-    secrets:
-      GITLAB_RUNNER_TOKEN: ${{ secrets.GITLAB_RUNNER_TOKEN }}
-      GITLAB_URL: ${{ secrets.GITLAB_URL }}
+  setup:
+    name: Calculate Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.calc.outputs.matrix }}
+    steps:
+      - id: calc
+        env:
+          WORKER_COUNT: ${{ inputs.workers || vars.WORKERS || 2 }}
+        run: |
+          COUNT=$(node -e "
+            const val = parseInt(process.env.WORKER_COUNT, 10);
+            const bounded = Math.max(1, Math.min(20, isNaN(val) ? 2 : val));
+            console.log(bounded);
+          ")
+          echo "Determined worker count: $COUNT"
+          MATRIX=$(node -e "console.log(JSON.stringify(Array.from({length: $COUNT}, (_, i) => i + 1)))")
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  worker:
+    needs: setup
+    name: Docker Worker
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        worker_id: ${{ fromJson(needs.setup.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - name: Execute GitLab CI Jobs in Docker Container
+        env:
+          GITLAB_URL: ${{ secrets.GITLAB_URL || 'https://gitlab.com' }}
+          GITLAB_RUNNER_TOKEN: ${{ secrets.GITLAB_RUNNER_TOKEN }}
+          WAIT_TIMEOUT: 35
+        run: |
+          echo "🚀 Worker #${{ matrix.worker_id }} listening for GitLab CI jobs via containerized gitlab-runner..."
+          
+          while docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            gitlab/gitlab-runner:latest \
+            run-single \
+            --url "${GITLAB_URL}" \
+            --token "${GITLAB_RUNNER_TOKEN}" \
+            --executor docker \
+            --docker-image "ubuntu:latest" \
+            --docker-privileged \
+            --docker-volumes "/var/run/docker.sock:/var/run/docker.sock" \
+            --docker-volumes "/cache" \
+            --wait-timeout "${WAIT_TIMEOUT}"; do
+            echo "✅ Job completed. Polling for subsequent pipeline stages..."
+          done
+
+          echo "🏁 Worker #${{ matrix.worker_id }} finished (no more pending jobs). Exiting."
