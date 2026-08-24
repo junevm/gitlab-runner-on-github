@@ -2,7 +2,6 @@
 
 Run GitLab CI/CD pipelines on-demand inside isolated Docker containers on GitHub Actions VMs with zero idle cost and **JIT Stage-Level Auto-Bursting**.
 
----
 
 ## 📐 Architecture & JIT Auto-Bursting
 
@@ -42,7 +41,6 @@ Stage 3: deploy (1 job) ──► Webhook ──► Cloudflare counts 1 pending 
 └───────────────────────────┘
 ```
 
----
 
 ## 🔐 Secrets & Tokens Reference
 
@@ -55,7 +53,6 @@ Stage 3: deploy (1 job) ──► Webhook ──► Cloudflare counts 1 pending 
 | **`WORKERS`** / **`MAX_WORKERS`** | **GitHub Repository Variable / Secret** (GitHub Repo > Settings > Variables > Actions) | *(Optional)* Maximum concurrency ceiling (e.g. `4` or `8`). Cloudflare Worker automatically bursts the exact number of VMs needed for each stage up to this limit. Defaults to `10` if omitted. | Optional |
 | **`GITLAB_URL`** | **GitHub Repository Secret** | *(Optional)* Target GitLab instance URL (e.g. `https://gitlab.example.com`). Defaults to `https://gitlab.com` if omitted. | Optional |
 
----
 
 ## 🚀 Step-by-Step Setup Guide
 
@@ -86,7 +83,6 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
      ```
    - Note the published worker URL (e.g. `https://gitlab-gha-bridge.<subdomain>.workers.dev`).
 
----
 
 ### 2. Register a Runner in GitLab
 
@@ -97,7 +93,6 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
 5. Click **Create runner**.
 6. Copy the generated **Runner authentication token** (starts with `glrt-...`).
 
----
 
 ### 3. Create the GitHub Runner Repository
 
@@ -111,7 +106,6 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
      - Name: `WORKERS`
      - Value: `4` (max parallel VMs ceiling, default is `10`).
 
----
 
 ### 4. Configure the GitLab Webhook
 
@@ -128,7 +122,6 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
 4. **Trigger**: Check **Pipeline events** and **Job events** (enables JIT stage auto-bursting).
 5. Click **Add webhook**.
 
----
 
 ### 5. Verify the Entire Setup
 
@@ -140,7 +133,6 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
    - Each VM runs `gitlab/gitlab-runner:latest` in Docker, claims pending GitLab jobs, and executes them.
    - When no jobs remain for 35 seconds, the runner exits and the GitHub VMs terminate cleanly.
 
----
 
 ## 🛠️ Local Tasks (`mise`)
 
@@ -153,7 +145,6 @@ mise run worker:secret:signing-token # Save GitLab HMAC signing token to Cloudfl
 mise run worker:secret:token         # Save legacy GitLab secret token to Cloudflare Worker
 ```
 
----
 
 ## 🛠️ Troubleshooting & FAQ
 

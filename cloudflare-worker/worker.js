@@ -1,14 +1,10 @@
 /**
  * Parametric GitLab Webhook -> GitHub Actions Dispatch Bridge (Cloudflare Worker)
  *
- * Routes GitLab Pipeline webhooks to dedicated, isolated GitHub Action runner repos.
- * Implements JIT Stage-Level Auto-Bursting: counts currently pending/created jobs
- * in the active pipeline stage and requests the exact number of VMs needed.
- *
- * Routing Options:
- *   1. Path-based:   POST https://bridge.your-subdomain.workers.dev/dispatch/my-project-runner
- *   2. Query-based:  POST https://bridge.your-subdomain.workers.dev/dispatch?repo=my-project-runner
- *   3. Default:      Falls back to env.GH_DEFAULT_REPO if configured.
+ * Routes GitLab Pipeline and Job webhooks to dedicated GitHub Action runner repos.
+ * Implements JIT Auto-Scaling:
+ *   - Pipeline Events: counts currently 'pending' jobs in the active stage.
+ *   - Job Events: bursts a runner whenever any job transitions to 'pending'.
  */
 
 async function verifyHmacSignature(signingToken, messageId, timestamp, rawBody, receivedSignatures) {
@@ -46,7 +42,7 @@ export default {
 
     const rawBody = await request.text();
 
-    // Check what credentials were provided by GitLab
+    // Check headers provided by GitLab
     const headerToken = request.headers.get("X-Gitlab-Token");
     const signature = request.headers.get("webhook-signature");
     const messageId = request.headers.get("webhook-id");
@@ -56,7 +52,6 @@ export default {
     let configuredSigningToken = env.GITLAB_SIGNING_TOKEN;
     let configuredSecretToken = env.GITLAB_SECRET_TOKEN;
 
-    // Auto-detect if user set whsec_ token in GITLAB_SECRET_TOKEN
     if (configuredSecretToken && configuredSecretToken.startsWith("whsec_") && !configuredSigningToken) {
       configuredSigningToken = configuredSecretToken;
       configuredSecretToken = undefined;
@@ -118,44 +113,49 @@ export default {
 
     const eventType = request.headers.get("X-Gitlab-Event");
     const objectKind = payload.object_kind;
-    const pipelineStatus = payload.object_attributes?.status;
 
-    // Only trigger when a pipeline is created, pending, or running
-    const isPipelineEvent = objectKind === "pipeline" || eventType === "Pipeline Hook";
-    const isActionableStatus = ["pending", "created", "running"].includes(pipelineStatus);
+    let isActionable = false;
+    let requiredWorkers = 1;
+    let activeStage = "default";
+    let pipelineId = payload.object_attributes?.id || payload.pipeline_id;
+    let refName = payload.object_attributes?.ref || payload.ref;
 
-    if (!isPipelineEvent || !isActionableStatus) {
+    if (objectKind === "pipeline" || eventType === "Pipeline Hook") {
+      const pipelineStatus = payload.object_attributes?.status;
+      if (["pending", "created", "running"].includes(pipelineStatus)) {
+        // Filter strictly for jobs that are currently pending execution (not created/waiting)
+        const builds = payload.builds || [];
+        const pendingBuilds = builds.filter((b) => b.status === "pending");
+
+        // If builds array exists, only dispatch if there is at least 1 pending job
+        if (builds.length === 0 || pendingBuilds.length > 0) {
+          isActionable = true;
+          requiredWorkers = Math.max(1, pendingBuilds.length || 1);
+          activeStage = pendingBuilds[0]?.stage || "default";
+        }
+      }
+    } else if (objectKind === "build" || eventType === "Job Hook") {
+      // Job event: fires whenever a single job enters 'pending' status
+      const jobStatus = payload.build_status;
+      if (jobStatus === "pending") {
+        isActionable = true;
+        requiredWorkers = 1;
+        activeStage = payload.build_stage || "job";
+        pipelineId = payload.pipeline_id;
+        refName = payload.ref;
+      }
+    }
+
+    if (!isActionable) {
       return new Response(
         JSON.stringify({
-          message: "Ignored event (not a pending/created/running pipeline event)",
+          message: "Ignored event (no pending jobs requiring execution)",
           object_kind: objectKind,
-          status: pipelineStatus,
+          status: payload.object_attributes?.status || payload.build_status,
         }),
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
     }
-
-    // JIT Stage Analysis: Count currently pending or created jobs
-    const builds = payload.builds || [];
-    const pendingBuilds = builds.filter(
-      (b) => b.status === "pending" || b.status === "created"
-    );
-
-    // If builds are listed and none are pending/created (e.g. all already running or finished), skip dispatch
-    if (builds.length > 0 && pendingBuilds.length === 0) {
-      return new Response(
-        JSON.stringify({
-          message: "Ignored event (no pending or created jobs in pipeline)",
-          pipeline_id: payload.object_attributes?.id,
-          status: pipelineStatus,
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
-      );
-    }
-
-    // Dynamic worker sizing: request 1 VM per pending job (fallback to 1 if no builds array)
-    const requiredWorkers = Math.max(1, pendingBuilds.length || 1);
-    const activeStage = pendingBuilds[0]?.stage || "default";
 
     // Resolve Target GitHub Repository
     const url = new URL(request.url);
@@ -168,12 +168,10 @@ export default {
       targetRepo = pathSegments[0];
     }
 
-    // Query parameter fallback: ?repo=...
     if (!targetRepo) {
       targetRepo = url.searchParams.get("repo");
     }
 
-    // Default repo fallback
     if (!targetRepo) {
       targetRepo = env.GH_DEFAULT_REPO;
     }
@@ -210,15 +208,14 @@ export default {
       body: JSON.stringify({
         event_type: "gitlab_pipeline",
         client_payload: {
-          pipeline_id: payload.object_attributes?.id,
-          ref: payload.object_attributes?.ref,
-          project_id: payload.project?.id,
-          project_name: payload.project?.name,
-          user: payload.user?.username,
-          status: pipelineStatus,
-          workers: requiredWorkers,
+          pipeline_id: pipelineId,
+          ref: refName,
+          project_id: payload.project?.id || payload.project_id,
+          project_name: payload.project?.name || payload.repository?.name,
+          user: payload.user?.username || payload.user_username,
           stage: activeStage,
-          pending_jobs: pendingBuilds.length,
+          workers: requiredWorkers,
+          event_type: objectKind,
         },
       }),
     });
@@ -237,13 +234,12 @@ export default {
 
     return new Response(
       JSON.stringify({
-        message: "Successfully triggered GitHub Actions runner with JIT stage sizing!",
+        message: "Successfully dispatched JIT runner event to GitHub Actions!",
         target_repo: `${githubOwner}/${targetRepo}`,
-        pipeline_id: payload.object_attributes?.id,
+        pipeline_id: pipelineId,
         stage: activeStage,
         workers: requiredWorkers,
-        pending_jobs: pendingBuilds.length,
-        ref: payload.object_attributes?.ref,
+        event_type: objectKind,
       }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
