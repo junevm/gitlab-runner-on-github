@@ -2,8 +2,8 @@
  * Parametric GitLab Webhook -> GitHub Actions Dispatch Bridge (Cloudflare Worker)
  *
  * Routes GitLab Pipeline webhooks to dedicated, isolated GitHub Action runner repos.
- * Supports both modern GitLab Standard Webhooks HMAC-SHA256 Signing Tokens
- * and legacy X-Gitlab-Token secret tokens with auto-detection.
+ * Implements JIT Stage-Level Auto-Bursting: counts currently pending/created jobs
+ * in the active pipeline stage and requests the exact number of VMs needed.
  *
  * Routing Options:
  *   1. Path-based:   POST https://bridge.your-subdomain.workers.dev/dispatch/my-project-runner
@@ -127,13 +127,35 @@ export default {
     if (!isPipelineEvent || !isActionableStatus) {
       return new Response(
         JSON.stringify({
-          message: "Ignored event (not a pending/created pipeline event)",
+          message: "Ignored event (not a pending/created/running pipeline event)",
           object_kind: objectKind,
           status: pipelineStatus,
         }),
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
     }
+
+    // JIT Stage Analysis: Count currently pending or created jobs
+    const builds = payload.builds || [];
+    const pendingBuilds = builds.filter(
+      (b) => b.status === "pending" || b.status === "created"
+    );
+
+    // If builds are listed and none are pending/created (e.g. all already running or finished), skip dispatch
+    if (builds.length > 0 && pendingBuilds.length === 0) {
+      return new Response(
+        JSON.stringify({
+          message: "Ignored event (no pending or created jobs in pipeline)",
+          pipeline_id: payload.object_attributes?.id,
+          status: pipelineStatus,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Dynamic worker sizing: request 1 VM per pending job (fallback to 1 if no builds array)
+    const requiredWorkers = Math.max(1, pendingBuilds.length || 1);
+    const activeStage = pendingBuilds[0]?.stage || "default";
 
     // Resolve Target GitHub Repository
     const url = new URL(request.url);
@@ -175,7 +197,7 @@ export default {
       );
     }
 
-    // Dispatch to GitHub Actions
+    // Dispatch JIT event to GitHub Actions
     const ghApiUrl = `https://api.github.com/repos/${githubOwner}/${targetRepo}/dispatches`;
     const ghResponse = await fetch(ghApiUrl, {
       method: "POST",
@@ -193,6 +215,10 @@ export default {
           project_id: payload.project?.id,
           project_name: payload.project?.name,
           user: payload.user?.username,
+          status: pipelineStatus,
+          workers: requiredWorkers,
+          stage: activeStage,
+          pending_jobs: pendingBuilds.length,
         },
       }),
     });
@@ -211,9 +237,12 @@ export default {
 
     return new Response(
       JSON.stringify({
-        message: "Successfully triggered GitHub Actions runner!",
+        message: "Successfully triggered GitHub Actions runner with JIT stage sizing!",
         target_repo: `${githubOwner}/${targetRepo}`,
         pipeline_id: payload.object_attributes?.id,
+        stage: activeStage,
+        workers: requiredWorkers,
+        pending_jobs: pendingBuilds.length,
         ref: payload.object_attributes?.ref,
       }),
       { status: 200, headers: { "Content-Type": "application/json" } }

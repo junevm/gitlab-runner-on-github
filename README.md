@@ -1,27 +1,35 @@
 # Ephemeral GitLab Docker Runner on GitHub Actions
 
-Run GitLab CI/CD pipelines on-demand inside isolated Docker containers on GitHub Actions VMs with zero idle cost.
+Run GitLab CI/CD pipelines on-demand inside isolated Docker containers on GitHub Actions VMs with zero idle cost and **JIT Stage-Level Auto-Bursting**.
 
+---
 
-## 📐 Architecture & How It Works
+## 📐 Architecture & JIT Auto-Bursting
+
+```text
+Stage 1: build (1 job)  ──► Webhook ──► Cloudflare counts 1 pending job ──► GHA boots 1 VM (0 idle waste)
+Stage 2: test (4 jobs)   ──► Webhook ──► Cloudflare counts 4 pending jobs ──► GHA bursts 4 VMs (100% parallel)
+Stage 3: deploy (1 job) ──► Webhook ──► Cloudflare counts 1 pending job ──► GHA boots 1 VM (0 idle waste)
+```
 
 ```text
 ┌───────────────────────────┐
 │ GitLab Project            │
-│  Pipeline created         │
+│  Pipeline stage transition│
 └─────────────┬─────────────┘
-              │ 1. Webhook (Pipeline event + HMAC Signature)
+              │ 1. Webhook (Pipeline event with builds[] list)
               ▼
 ┌───────────────────────────┐
 │ Cloudflare Worker         │
 │  - Verifies HMAC signature│
+│  - Counts pending jobs    │
 │  - Uses GH_PAT to dispatch│
 └─────────────┬─────────────┘
-              │ 2. POST /repos/{owner}/{repo}/dispatches (using GH_PAT)
+              │ 2. POST /repos/{owner}/{repo}/dispatches (workers: count)
               ▼
 ┌───────────────────────────┐
 │ GitHub Actions Runner Repo│
-│  - Spawns N parallel VMs  │
+│  - Bursts exact N VMs     │
 │  - Runs gitlab-runner     │
 │    container with glrt-.. │
 └─────────────┬─────────────┘
@@ -34,6 +42,7 @@ Run GitLab CI/CD pipelines on-demand inside isolated Docker containers on GitHub
 └───────────────────────────┘
 ```
 
+---
 
 ## 🔐 Secrets & Tokens Reference
 
@@ -43,15 +52,16 @@ Run GitLab CI/CD pipelines on-demand inside isolated Docker containers on GitHub
 | **`GH_OWNER`** | **`cloudflare-worker/wrangler.toml`** (`[vars] GH_OWNER = "..."`) | Your GitHub username or organization (e.g. `junevm`). The Worker uses this to construct GitHub API URLs. | **Yes** |
 | **`GITLAB_SIGNING_TOKEN`** | **Cloudflare Worker Secret** (`mise run worker:secret:signing-token`) | **Webhook HMAC-SHA256 Signing Key** (`whsec_...`). Generated in GitLab Webhook settings. The Cloudflare Worker uses this key to cryptographically verify that incoming webhooks genuinely originated from your GitLab instance. | **Recommended** |
 | **`GITLAB_RUNNER_TOKEN`** | **GitHub Repository Secret** (GitHub Repo > Settings > Secrets > Actions) | **GitLab Runner Authentication Token** (`glrt-...`). Created in GitLab CI/CD > Runners. The `gitlab-runner` container uses this token to register and fetch pending pipeline jobs from GitLab. | **Yes** |
-| **`WORKERS`** | **GitHub Repository Variable** (GitHub Repo > Settings > Variables > Actions) | *(Optional)* Number of parallel GitHub Actions VMs to spawn per pipeline. Defaults to `2`. | Optional |
+| **`WORKERS`** / **`MAX_WORKERS`** | **GitHub Repository Variable / Secret** (GitHub Repo > Settings > Variables > Actions) | *(Optional)* Maximum concurrency ceiling (e.g. `4` or `8`). Cloudflare Worker automatically bursts the exact number of VMs needed for each stage up to this limit. Defaults to `10` if omitted. | Optional |
 | **`GITLAB_URL`** | **GitHub Repository Secret** | *(Optional)* Target GitLab instance URL (e.g. `https://gitlab.example.com`). Defaults to `https://gitlab.com` if omitted. | Optional |
 
+---
 
 ## 🚀 Step-by-Step Setup Guide
 
 ### 1. Deploy the Cloudflare Webhook Bridge (One-Time Setup)
 
-The Cloudflare Worker is a single, central router that receives webhooks from any number of GitLab projects and triggers their corresponding GitHub runner repositories.
+The Cloudflare Worker is a single, central router that receives webhooks from any number of GitLab projects and triggers their corresponding GitHub runner repositories with exact JIT stage sizing.
 
 1. **Create the GitHub Personal Access Token (`GH_PAT`)**:
    - Go to GitHub > **Settings** > **Developer Settings** > **Personal access tokens** > **Fine-grained tokens**.
@@ -76,6 +86,7 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
      ```
    - Note the published worker URL (e.g. `https://gitlab-gha-bridge.<subdomain>.workers.dev`).
 
+---
 
 ### 2. Register a Runner in GitLab
 
@@ -86,6 +97,7 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
 5. Click **Create runner**.
 6. Copy the generated **Runner authentication token** (starts with `glrt-...`).
 
+---
 
 ### 3. Create the GitHub Runner Repository
 
@@ -97,8 +109,9 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
      - Value: Paste the `glrt-...` token from Step 2.
    - **Variables tab** > **New repository variable** *(optional)*:
      - Name: `WORKERS`
-     - Value: `4` (number of parallel VMs to spawn, default is `2`).
+     - Value: `4` (max parallel VMs ceiling, default is `10`).
 
+---
 
 ### 4. Configure the GitLab Webhook
 
@@ -115,6 +128,7 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
 4. **Trigger**: Check **Pipeline events**.
 5. Click **Add webhook**.
 
+---
 
 ### 5. Verify the Entire Setup
 
@@ -122,10 +136,11 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
 2. You should see a success banner: `Hook executed successfully: HTTP 200` (or `HTTP 201`).
 3. Check your GitHub runner repository under the **Actions** tab:
    - A workflow run `gitlab_pipeline` will appear immediately.
-   - It spawns $N$ parallel Ubuntu VMs (`WORKERS`).
+   - It bursts the exact number of VMs needed for currently pending jobs.
    - Each VM runs `gitlab/gitlab-runner:latest` in Docker, claims pending GitLab jobs, and executes them.
    - When no jobs remain for 35 seconds, the runner exits and the GitHub VMs terminate cleanly.
 
+---
 
 ## 🛠️ Local Tasks (`mise`)
 
@@ -138,6 +153,7 @@ mise run worker:secret:signing-token # Save GitLab HMAC signing token to Cloudfl
 mise run worker:secret:token         # Save legacy GitLab secret token to Cloudflare Worker
 ```
 
+---
 
 ## 🛠️ Troubleshooting & FAQ
 

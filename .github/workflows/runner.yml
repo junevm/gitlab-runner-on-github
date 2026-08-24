@@ -6,12 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       workers:
-        description: "Number of parallel GitHub Actions VM workers (leave empty to use WORKERS secret/variable)"
+        description: "Number of parallel GitHub Actions VM workers (leave empty for JIT auto-scaling)"
         required: false
         type: string
 
 concurrency:
-  group: gitlab-runner-${{ github.event.client_payload.pipeline_id || github.run_id }}
+  # Scoped per pipeline + stage so stage transitions burst immediately without blocking
+  group: gitlab-runner-${{ github.event.client_payload.pipeline_id || github.run_id }}-${{ github.event.client_payload.stage || 'manual' }}
   cancel-in-progress: false
 
 jobs:
@@ -20,19 +21,34 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.calc.outputs.matrix }}
+      worker_count: ${{ steps.calc.outputs.worker_count }}
     steps:
       - id: calc
         env:
-          WORKER_COUNT: ${{ inputs.workers || vars.WORKERS || secrets.WORKERS || 2 }}
+          MANUAL_INPUT: ${{ inputs.workers }}
+          JIT_WORKERS: ${{ github.event.client_payload.workers }}
+          CONFIG_MAX: ${{ vars.MAX_WORKERS || vars.WORKERS || secrets.WORKERS || '10' }}
         run: |
           COUNT=$(node -e "
-            const val = parseInt(process.env.WORKER_COUNT, 10);
-            const bounded = Math.max(1, Math.min(20, isNaN(val) ? 2 : val));
+            const manual = parseInt(process.env.MANUAL_INPUT, 10);
+            const jit = parseInt(process.env.JIT_WORKERS, 10);
+            const max = parseInt(process.env.CONFIG_MAX, 10) || 10;
+            
+            let chosen;
+            if (!isNaN(manual) && manual > 0) {
+              chosen = manual;
+            } else if (!isNaN(jit) && jit > 0) {
+              chosen = Math.min(jit, max);
+            } else {
+              chosen = Math.min(max, 2);
+            }
+            const bounded = Math.max(1, Math.min(20, chosen));
             console.log(bounded);
           ")
-          echo "Determined worker count: $COUNT"
+          echo "Determined JIT worker count: $COUNT (Stage: ${{ github.event.client_payload.stage || 'manual' }}, Requested: ${{ github.event.client_payload.workers || 'none' }})"
           MATRIX=$(node -e "console.log(JSON.stringify(Array.from({length: $COUNT}, (_, i) => i + 1)))")
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "worker_count=$COUNT" >> "$GITHUB_OUTPUT"
 
   worker:
     needs: setup
@@ -49,7 +65,7 @@ jobs:
           GITLAB_RUNNER_TOKEN: ${{ secrets.GITLAB_RUNNER_TOKEN }}
           WAIT_TIMEOUT: 35
         run: |
-          echo "🚀 Worker #${{ matrix.worker_id }} listening for GitLab CI jobs (timeout: ${WAIT_TIMEOUT}s)..."
+          echo "🚀 Worker #${{ matrix.worker_id }}/${{ needs.setup.outputs.worker_count }} listening for GitLab CI jobs (timeout: ${WAIT_TIMEOUT}s)..."
           
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
