@@ -2,8 +2,6 @@
 
 Run GitLab CI/CD pipelines on-demand inside isolated Docker containers on GitHub Actions VMs with zero idle cost.
 
----
-
 ## 📐 Architecture
 
 ```text
@@ -16,8 +14,6 @@ Cloudflare Worker (Router) ──[GH_PAT]──► GitHub Actions Repo (N VMs)
                                          docker run gitlab/gitlab-runner
                                          (Pulls & executes jobs, auto-exits)
 ```
-
----
 
 ## 📋 Prerequisites & Secrets
 
@@ -34,8 +30,6 @@ Cloudflare Worker (Router) ──[GH_PAT]──► GitHub Actions Repo (N VMs)
 | **`GITLAB_RUNNER_TOKEN`** | GitHub Repository Secret | Project runner authentication token (`glrt-...`) from GitLab CI/CD Settings. | Yes |
 | **`WORKERS`** | GitHub Repository Variable | *(Optional)* Number of parallel VM workers to spawn (e.g. `2`, `4`). Defaults to `2`. | Optional |
 | **`GITLAB_URL`** | GitHub Repository Secret | *(Optional)* Target GitLab instance URL. Defaults to `https://gitlab.com`. | Optional |
-
----
 
 ## 🚀 Setup Guide
 
@@ -59,16 +53,12 @@ The Cloudflare Worker verifies incoming GitLab webhooks and triggers GitHub Acti
      ```
    - Note the deployed URL (e.g. `https://gitlab-gha-bridge.<subdomain>.workers.dev`).
 
----
-
 ### 2. Register Runner in GitLab
 
 1. In GitLab: navigate to your project > **Settings** > **CI/CD** > **Runners**.
 2. Click **New project runner**.
 3. Select Platform **Linux**, configure tags (or check **Run untagged jobs**), and click **Create runner**.
 4. Copy the displayed runner token (`glrt-...`).
-
----
 
 ### 3. Setup GitHub Runner Repository
 
@@ -77,8 +67,6 @@ The Cloudflare Worker verifies incoming GitLab webhooks and triggers GitHub Acti
 3. In GitHub: **Settings** > **Secrets and variables** > **Actions**:
    - Under **Secrets**, add `GITLAB_RUNNER_TOKEN` with the `glrt-...` token.
    - *(Optional)* Under **Variables**, add `WORKERS` with the desired concurrency (e.g. `4`).
-
----
 
 ### 4. Configure GitLab Webhook
 
@@ -94,8 +82,6 @@ The Cloudflare Worker verifies incoming GitLab webhooks and triggers GitHub Acti
 4. **Trigger**: Check **Pipeline events**.
 5. Click **Add webhook**, then click **Test** > **Pipeline events** to verify (`HTTP 200` / `201`).
 
----
-
 ## 🛠️ Local Tasks (`mise`)
 
 ```bash
@@ -106,8 +92,6 @@ mise run worker:secret:pat           # Set GitHub PAT secret in Cloudflare
 mise run worker:secret:signing-token # Set GitLab HMAC signing token secret in Cloudflare
 mise run worker:secret:token         # Set legacy GitLab secret token in Cloudflare
 ```
-
----
 
 ## 🔍 Execution Lifecycle
 
@@ -120,8 +104,6 @@ mise run worker:secret:token         # Set legacy GitLab secret token in Cloudfl
 6. GitLab jobs execute inside Docker containers
 7. When queue is empty for 35s, runners exit and VMs terminate cleanly
 ```
-
----
 
 ## 🛠️ Troubleshooting
 
