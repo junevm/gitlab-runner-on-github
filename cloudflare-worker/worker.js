@@ -3,7 +3,7 @@
  *
  * Routes GitLab Pipeline webhooks to dedicated, isolated GitHub Action runner repos.
  * Supports both modern GitLab Standard Webhooks HMAC-SHA256 Signing Tokens
- * and legacy X-Gitlab-Token secret tokens.
+ * and legacy X-Gitlab-Token secret tokens with auto-detection.
  *
  * Routing Options:
  *   1. Path-based:   POST https://bridge.your-subdomain.workers.dev/dispatch/my-project-runner
@@ -46,33 +46,61 @@ export default {
 
     const rawBody = await request.text();
 
-    // 1. Authenticate using Signing Token (HMAC-SHA256 - Recommended)
-    if (env.GITLAB_SIGNING_TOKEN) {
-      const messageId = request.headers.get("webhook-id");
-      const timestamp = request.headers.get("webhook-timestamp");
-      const signature = request.headers.get("webhook-signature");
+    // Check what credentials were provided by GitLab
+    const headerToken = request.headers.get("X-Gitlab-Token");
+    const signature = request.headers.get("webhook-signature");
+    const messageId = request.headers.get("webhook-id");
+    const timestamp = request.headers.get("webhook-timestamp");
 
-      const isValid = await verifyHmacSignature(
-        env.GITLAB_SIGNING_TOKEN,
-        messageId,
-        timestamp,
-        rawBody,
-        signature
-      );
+    // Resolve configured signing token and secret token (with auto-detection)
+    let configuredSigningToken = env.GITLAB_SIGNING_TOKEN;
+    let configuredSecretToken = env.GITLAB_SECRET_TOKEN;
 
-      if (!isValid) {
-        return new Response(
-          JSON.stringify({ error: "Unauthorized: Invalid webhook-signature HMAC" }),
-          { status: 401, headers: { "Content-Type": "application/json" } }
+    // Auto-detect if user set whsec_ token in GITLAB_SECRET_TOKEN
+    if (configuredSecretToken && configuredSecretToken.startsWith("whsec_") && !configuredSigningToken) {
+      configuredSigningToken = configuredSecretToken;
+      configuredSecretToken = undefined;
+    }
+
+    // Authentication Validation
+    const requiresAuth = Boolean(configuredSigningToken || configuredSecretToken);
+
+    if (requiresAuth) {
+      let authenticated = false;
+
+      // 1. Check Signing Token (HMAC-SHA256)
+      if (configuredSigningToken && signature) {
+        authenticated = await verifyHmacSignature(
+          configuredSigningToken,
+          messageId,
+          timestamp,
+          rawBody,
+          signature
         );
       }
-    }
-    // 2. Authenticate using Secret Token (X-Gitlab-Token - Fallback)
-    else if (env.GITLAB_SECRET_TOKEN) {
-      const token = request.headers.get("X-Gitlab-Token");
-      if (token !== env.GITLAB_SECRET_TOKEN) {
+
+      // 2. Check Plain Secret Token (X-Gitlab-Token)
+      if (!authenticated && configuredSecretToken && headerToken) {
+        authenticated = (headerToken === configuredSecretToken);
+      }
+
+      if (!authenticated) {
+        let failureReason = "Token mismatch or missing authentication header.";
+        if (configuredSigningToken && !signature) {
+          failureReason = "Worker expects a GitLab Signing Token (webhook-signature header), but GitLab sent a plain token or none. Generate a signing token in GitLab or configure GITLAB_SECRET_TOKEN in Cloudflare.";
+        } else if (configuredSecretToken && !headerToken) {
+          failureReason = "Worker expects X-Gitlab-Token header, but none was sent by GitLab. Ensure 'Secret token' is filled in GitLab Webhook settings.";
+        }
+
         return new Response(
-          JSON.stringify({ error: "Unauthorized: Invalid X-Gitlab-Token header" }),
+          JSON.stringify({
+            error: "Unauthorized: Invalid webhook authentication",
+            details: failureReason,
+            received_headers: {
+              has_x_gitlab_token: Boolean(headerToken),
+              has_webhook_signature: Boolean(signature)
+            }
+          }),
           { status: 401, headers: { "Content-Type": "application/json" } }
         );
       }
@@ -99,7 +127,7 @@ export default {
     if (!isPipelineEvent || !isActionableStatus) {
       return new Response(
         JSON.stringify({
-          message: "Ignored event",
+          message: "Ignored event (not a pending/created pipeline event)",
           object_kind: objectKind,
           status: pipelineStatus,
         }),
