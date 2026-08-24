@@ -27,7 +27,7 @@ jobs:
         env:
           MANUAL_INPUT: ${{ inputs.workers }}
           JIT_WORKERS: ${{ github.event.client_payload.workers }}
-          CONFIG_MAX: ${{ vars.MAX_WORKERS || vars.WORKERS || secrets.WORKERS || '10' }}
+          CONFIG_MAX: ${{ vars.MAX_WORKERS || vars.WORKERS || '10' }}
         run: |
           COUNT=$(node -e "
             const manual = parseInt(process.env.MANUAL_INPUT, 10);
