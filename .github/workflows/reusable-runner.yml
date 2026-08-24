@@ -54,9 +54,9 @@ jobs:
           GITLAB_RUNNER_TOKEN: ${{ secrets.GITLAB_RUNNER_TOKEN }}
           WAIT_TIMEOUT: ${{ inputs.wait_timeout || '35' }}
         run: |
-          echo "🚀 Worker #${{ matrix.worker_id }} listening for GitLab CI jobs via containerized gitlab-runner..."
+          echo "🚀 Worker #${{ matrix.worker_id }} listening for GitLab CI jobs (timeout: ${WAIT_TIMEOUT}s)..."
           
-          while docker run --rm \
+          docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             gitlab/gitlab-runner:latest \
             run-single \
@@ -67,8 +67,6 @@ jobs:
             --docker-privileged \
             --docker-volumes "/var/run/docker.sock:/var/run/docker.sock" \
             --docker-volumes "/cache" \
-            --wait-timeout "${WAIT_TIMEOUT}"; do
-            echo "✅ Job completed. Polling for subsequent pipeline stages..."
-          done
+            --wait-timeout "${WAIT_TIMEOUT}"
 
-          echo "🏁 Worker #${{ matrix.worker_id }} finished (no more pending jobs). Exiting."
+          echo "🏁 Worker #${{ matrix.worker_id }} finished. Exiting VM."
