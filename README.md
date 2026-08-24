@@ -2,7 +2,7 @@
 
 Run **GitLab CI/CD pipelines on GitHub Actions VMs** using the **Docker executor**, on-demand, with complete project isolation and zero idle cost.
 
----
+
 
 ## 🎯 Architecture Overview
 
@@ -44,7 +44,7 @@ Run **GitLab CI/CD pipelines on GitHub Actions VMs** using the **Docker executor
 └─────────────────────────────────────────────────────────────┘
 ```
 
----
+
 
 ## 🔑 Core Design Principles
 
@@ -54,7 +54,7 @@ Run **GitLab CI/CD pipelines on GitHub Actions VMs** using the **Docker executor
 4. **Configurable Multi-VM Elasticity**: Set the number of parallel VMs per project via a simple repository variable (`WORKERS`).
 5. **Universal Parametric Routing**: A single Cloudflare Worker dynamically routes webhooks to any project runner repo without code changes.
 
----
+
 
 ## 🛠️ Local Development & Tooling with `mise`
 
@@ -72,7 +72,7 @@ mise run worker:secret:pat      # Set GH_PAT secret in Cloudflare Worker
 mise run worker:secret:token    # Set GITLAB_SECRET_TOKEN secret in Cloudflare Worker
 ```
 
----
+
 
 ## 📋 Prerequisites
 
@@ -81,7 +81,7 @@ mise run worker:secret:token    # Set GITLAB_SECRET_TOKEN secret in Cloudflare W
 - **Cloudflare**: Free account (used for the zero-cost webhook bridge).
 - **Local Tools**: [`mise`](https://mise.jdx.dev) (recommended) or `node` (v18+) and `npm`.
 
----
+
 
 ## 🚀 Step-by-Step Setup Guide
 
@@ -121,7 +121,7 @@ The Cloudflare Worker acts as the bridge between GitLab's Webhook payload and Gi
      ```
    - Note down the published worker URL (e.g. `https://gitlab-gha-bridge.<your-subdomain>.workers.dev`).
 
----
+
 
 ### Step 2: Create a Project Runner in GitLab
 
@@ -134,7 +134,7 @@ The Cloudflare Worker acts as the bridge between GitLab's Webhook payload and Gi
 6. Copy the displayed **Runner authentication token** (starts with `glrt-...`).  
    *(Note: This token is shown only once).*
 
----
+
 
 ### Step 3: Create the Dedicated GitHub Runner Repository
 
@@ -152,7 +152,7 @@ The Cloudflare Worker acts as the bridge between GitLab's Webhook payload and Gi
      - Value: Paste the `glrt-...` token from Step 2.
    - *(Optional)* If using a self-hosted GitLab instance, add `GITLAB_URL` (e.g., `https://gitlab.example.com`). Defaults to `https://gitlab.com` if omitted.
 
----
+
 
 ### Step 4: Configure Concurrency / Elasticity
 
@@ -166,7 +166,7 @@ To control how many parallel GitHub Actions VMs boot for this project:
 
 *Tip: You can also override the worker count ad-hoc when manually triggering the workflow via the GitHub Actions UI.*
 
----
+
 
 ### Step 5: Configure the GitLab Webhook
 
@@ -180,13 +180,8 @@ To control how many parallel GitHub Actions VMs boot for this project:
 3. Click **Add webhook**.
 4. Test the connection: Click **Test** > **Pipeline events** next to the created webhook. It should return HTTP `200 OK`.
 
----
 
-## 📝 Example Pipeline Definition
 
-For reference on structuring multi-stage, containerized builds with services and Docker-in-Docker, see [`.gitlab-ci.example.yml`](.gitlab-ci.example.yml).
-
----
 
 ## 🔍 Technical Details
 
@@ -195,19 +190,3 @@ For reference on structuring multi-stage, containerized builds with services and
 - **Lifecycle & Auto-Shutdown**: Each VM runs `gitlab-runner run-single` inside a loop. When all jobs in the pipeline finish and the queue is empty for 35s, the process exits non-zero, terminating the loop and cleanly stopping the VM.
 - **Webhook Bridge**: The worker in [`cloudflare-worker/worker.js`](cloudflare-worker/worker.js) inspects incoming webhook events, validates the pipeline status (`pending` / `created`), extracts the target repo from the URL path, and calls GitHub's `POST /repos/{owner}/{repo}/dispatches` endpoint.
 
----
-
-## 🛠️ Troubleshooting & FAQ
-
-### Webhook returns HTTP 400 "Missing target repository"
-Ensure your GitLab webhook URL includes the target repo path: `https://<WORKER_URL>/dispatch/<REPO_NAME>`.
-
-### Webhook returns HTTP 502 "GitHub API error"
-Verify that `GH_PAT` in Cloudflare has valid permissions (`Actions: Read and Write`, `Metadata: Read`) and that `GH_OWNER` in `wrangler.toml` matches the repository owner.
-
-### GitLab CI jobs remain in "Pending" / "Stuck"
-- Verify that the runner tag in `.gitlab-ci.yml` matches the tag assigned to the runner in GitLab (or that the runner has "Run untagged jobs" enabled).
-- Check that `GITLAB_RUNNER_TOKEN` is correctly set in GitHub Secrets.
-
-### Parallel jobs running sequentially instead of concurrently
-Increase the `WORKERS` variable in your GitHub runner repository settings (e.g. `WORKERS = 4`). Ensure your GitHub account has enough available Action concurrency slots.
