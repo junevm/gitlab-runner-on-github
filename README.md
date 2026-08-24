@@ -2,7 +2,6 @@
 
 Run GitLab CI/CD pipelines on-demand inside isolated Docker containers on GitHub Actions VMs with zero idle cost.
 
----
 
 ## 📐 Architecture & How It Works
 
@@ -35,7 +34,6 @@ Run GitLab CI/CD pipelines on-demand inside isolated Docker containers on GitHub
 └───────────────────────────┘
 ```
 
----
 
 ## 🔐 Secrets & Tokens Reference
 
@@ -48,7 +46,6 @@ Run GitLab CI/CD pipelines on-demand inside isolated Docker containers on GitHub
 | **`WORKERS`** | **GitHub Repository Variable** (GitHub Repo > Settings > Variables > Actions) | *(Optional)* Number of parallel GitHub Actions VMs to spawn per pipeline. Defaults to `2`. | Optional |
 | **`GITLAB_URL`** | **GitHub Repository Secret** | *(Optional)* Target GitLab instance URL (e.g. `https://gitlab.example.com`). Defaults to `https://gitlab.com` if omitted. | Optional |
 
----
 
 ## 🚀 Step-by-Step Setup Guide
 
@@ -79,7 +76,6 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
      ```
    - Note the published worker URL (e.g. `https://gitlab-gha-bridge.<subdomain>.workers.dev`).
 
----
 
 ### 2. Register a Runner in GitLab
 
@@ -90,7 +86,6 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
 5. Click **Create runner**.
 6. Copy the generated **Runner authentication token** (starts with `glrt-...`).
 
----
 
 ### 3. Create the GitHub Runner Repository
 
@@ -104,7 +99,6 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
      - Name: `WORKERS`
      - Value: `4` (number of parallel VMs to spawn, default is `2`).
 
----
 
 ### 4. Configure the GitLab Webhook
 
@@ -121,7 +115,6 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
 4. **Trigger**: Check **Pipeline events**.
 5. Click **Add webhook**.
 
----
 
 ### 5. Verify the Entire Setup
 
@@ -133,7 +126,6 @@ The Cloudflare Worker is a single, central router that receives webhooks from an
    - Each VM runs `gitlab/gitlab-runner:latest` in Docker, claims pending GitLab jobs, and executes them.
    - When no jobs remain for 35 seconds, the runner exits and the GitHub VMs terminate cleanly.
 
----
 
 ## 🛠️ Local Tasks (`mise`)
 
@@ -146,7 +138,6 @@ mise run worker:secret:signing-token # Save GitLab HMAC signing token to Cloudfl
 mise run worker:secret:token         # Save legacy GitLab secret token to Cloudflare Worker
 ```
 
----
 
 ## 🛠️ Troubleshooting & FAQ
 
