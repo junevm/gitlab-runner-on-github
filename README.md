@@ -190,13 +190,17 @@ GitLab supports two authentication mechanisms for webhooks. For best security, u
          mise run worker:secret:token
          # (Runs: npx wrangler secret put GITLAB_SECRET_TOKEN)
          ```
+   - **Deploy the Worker** (Required whenever you add or update secrets):
+     ```bash
+     mise run worker:deploy
+     ```
    - **Trigger**: Check **Pipeline events** (triggers whenever a pipeline is created, pending, or status changes).
    - **Enable SSL verification**: Keep checked.
 3. Click **Add webhook**.
 
 ---
 
-### Step 6: Test & Verify Delivery
+### Step 6: Test & Verify Webhook Connection
 
 1. In GitLab, under **Project Settings** > **Webhooks**, locate your webhook in the list.
 2. Click **Test** > select **Pipeline events**.
@@ -208,9 +212,37 @@ GitLab supports two authentication mechanisms for webhooks. For best security, u
 
 ---
 
+### Step 7: Run Your First CI/CD Pipeline
+
+With setup complete, verify the full automated flow:
+
+1. In your GitLab project repository, create or update `.gitlab-ci.yml` (see [`.gitlab-ci.example.yml`](.gitlab-ci.example.yml) for sample jobs).
+2. Commit and push your code to GitLab:
+   ```bash
+   git add .gitlab-ci.yml
+   git commit -m "Configure CI pipeline"
+   git push origin main
+   ```
+3. **Observe Automated Execution**:
+   - **GitLab**: The pipeline is created and enters `pending` status. Webhook triggers automatically.
+   - **Cloudflare Worker**: Authenticates the payload and dispatches a workflow run to GitHub Actions.
+   - **GitHub Actions**: Spawns $N$ parallel Ubuntu VMs (`vars.WORKERS`), pulls the `gitlab-runner` binary, and registers with Docker executor.
+   - **Live Execution**: GitLab CI jobs execute inside Docker containers on the GitHub VMs. Logs stream live in the GitLab UI.
+   - **Clean Auto-Shutdown**: When all pipeline stages complete, the runners wait 35s, find no remaining jobs, and exit. The GitHub VMs shut down with zero wasted minutes.
+
+---
+
 ## 📝 Example Pipeline Definition
 
 For reference on structuring multi-stage, containerized builds with services and Docker-in-Docker, see [`.gitlab-ci.example.yml`](.gitlab-ci.example.yml).
+
+---
+
+## 🔄 Day-2 Operations & Scaling
+
+- **Adding More Projects**: To onboard another GitLab project, repeat **Steps 2 to 5**. You reuse the exact same Cloudflare Worker endpoint and central workflow without writing new code.
+- **Updating Runner Versions / Logic**: Changes made to [`.github/workflows/reusable-runner.yml`](.github/workflows/reusable-runner.yml) in this repository automatically propagate to all project runner repos on their next pipeline run.
+- **Adjusting Concurrency**: Change `WORKERS` under GitHub Repo Settings > Variables at any time to scale parallel worker VMs up or down.
 
 ---
 
@@ -226,10 +258,10 @@ For reference on structuring multi-stage, containerized builds with services and
 ## 🛠️ Troubleshooting & FAQ
 
 ### Webhook returns HTTP 401 "Unauthorized: Invalid webhook-signature HMAC"
-The signing token configured in GitLab does not match `GITLAB_SIGNING_TOKEN` in Cloudflare. Run `mise run worker:secret:signing-token` to update it with the `whsec_...` value from GitLab.
+The signing token configured in GitLab does not match `GITLAB_SIGNING_TOKEN` in Cloudflare. Run `mise run worker:secret:signing-token` to update it with the `whsec_...` value from GitLab, then run `mise run worker:deploy`.
 
 ### Webhook returns HTTP 401 "Unauthorized: Invalid X-Gitlab-Token header"
-The secret string entered in GitLab Webhook settings does not match `GITLAB_SECRET_TOKEN` in Cloudflare. Update either GitLab's Webhook Secret Token or run `mise run worker:secret:token` to realign them.
+The secret string entered in GitLab Webhook settings does not match `GITLAB_SECRET_TOKEN` in Cloudflare. Update either GitLab's Webhook Secret Token or run `mise run worker:secret:token` to realign them, then run `mise run worker:deploy`.
 
 ### Webhook returns HTTP 400 "Missing target repository"
 Ensure your GitLab webhook URL includes the target repo path: `https://<WORKER_URL>/dispatch/<REPO_NAME>`.
@@ -246,3 +278,13 @@ GitLab automatically disables webhooks if they repeatedly encounter 5xx errors o
 
 ### Parallel jobs running sequentially instead of concurrently
 Increase the `WORKERS` variable in your GitHub runner repository settings (e.g. `WORKERS = 4`). Ensure your GitHub account has enough available Action concurrency slots.
+
+---
+
+## 🏁 Summary
+
+This setup delivers a production-ready CI/CD bridge with:
+- **Zero Idle Infrastructure**: VMs exist only while jobs are running and shut down 35 seconds after pipeline completion.
+- **Complete Project Isolation**: 1:1 dedicated runner repositories and project-level authentication tokens guarantee zero cross-project contamination.
+- **Enterprise-Grade Security**: Cryptographic HMAC-SHA256 webhook signatures and ephemeral, single-use GitHub Action environments.
+- **Effortless Scaling**: A single Cloudflare Worker and central reusable workflow power unlimited GitLab projects across your organization.
