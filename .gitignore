@@ -1,0 +1,10 @@
+# Cloudflare Wrangler & Local Dev
+cloudflare-worker/.wrangler/
+.wrangler/
+node_modules/
+
+# OS & Editor
+.DS_Store
+*.swp
+*.swo
+*~
